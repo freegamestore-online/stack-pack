@@ -1,97 +1,112 @@
 import kaplay from "kaplay";
 
 const VW = 400;
-const VH = 680;
-const CELL = 38;
-const COLS = 8;
-const GRID_X = (VW - COLS * CELL) / 2;
-const PLAY_TOP = 60;   // below HUD
-const PLAY_H = VH - PLAY_TOP;
+const VH = 640;
 
-// ── Piece shapes: [row, col] offsets, normalised to top-left = 0,0 ──
-// Each shape is designed so the gap in the wall exactly matches it.
-const SHAPES: number[][][] = [
-  // I-2 (2 wide)
-  [[0,0],[0,1]],
-  // I-3
-  [[0,0],[0,1],[0,2]],
-  // I-4
-  [[0,0],[0,1],[0,2],[0,3]],
-  // L
-  [[0,0],[1,0],[2,0],[2,1]],
-  // J
-  [[0,1],[1,1],[2,1],[2,0]],
-  // T
-  [[0,0],[0,1],[0,2],[1,1]],
-  // S
-  [[0,1],[0,2],[1,0],[1,1]],
-  // Z
-  [[0,0],[0,1],[1,1],[1,2]],
-  // Square
-  [[0,0],[0,1],[1,0],[1,1]],
-  // Corner
-  [[0,0],[1,0],[1,1]],
-  // S-tall
-  [[0,0],[1,0],[1,1],[2,1]],
-  // Z-tall
-  [[0,1],[1,1],[1,0],[2,0]],
-];
+// Grid: 10 columns, cells are 34px wide
+const COLS = 10;
+const CELL = 34;
+const GRID_X = (VW - COLS * CELL) / 2; // left edge of grid
+const HUD_H = 56; // height of top HUD
+const TROPHY_Y = HUD_H + 40; // y position of the trophy line
+const PIECE_Y = TROPHY_Y + 60; // y where the sliding piece lives
+const WALL_START_Y = VH + 20; // wall starts below screen
 
 type Mode = "easy" | "hard" | "extreme";
 
-const LEVELS_PER_MODE = 64;
+// Shapes as column offsets (all 1 row tall — they slide horizontally)
+// Each shape is an array of column offsets from the leftmost cell
+const SHAPES: number[][] = [
+  [0],             // single block
+  [0, 1],          // 2-wide bar
+  [0, 1, 2],       // 3-wide bar
+  [0, 1, 2, 3],    // 4-wide bar (I)
+  [0, 1, 3],       // gap in middle (tricky)
+  [0, 2],          // 2 with gap
+  [0, 1, 2, 3, 4], // 5-wide
+  [0, 2, 3],       // L-like
+  [0, 1, 3, 4],    // S-like
+];
 
-const MODE_CFG: Record<Mode, { wallSpeed: number; pieceSpeed: number; label: string; color: [number,number,number] }> = {
-  easy:    { wallSpeed: 28,  pieceSpeed: 80,  label: "EASY",    color: [72, 187, 120] },
-  hard:    { wallSpeed: 55,  pieceSpeed: 130, label: "HARD",    color: [246, 173, 85] },
-  extreme: { wallSpeed: 95,  pieceSpeed: 190, label: "EXTREME", color: [239, 68, 68]  },
+// Shapes for hard/extreme — include multi-row shapes
+// We represent multi-row shapes as [row, col] pairs
+type Cell = [number, number];
+
+const SHAPES_MULTI: Cell[][] = [
+  // flat bar
+  [[0,0],[0,1],[0,2]],
+  // L shape
+  [[0,0],[1,0],[2,0],[2,1]],
+  // J shape
+  [[0,1],[1,1],[2,1],[2,0]],
+  // T shape
+  [[0,0],[0,1],[0,2],[1,1]],
+  // S shape
+  [[0,1],[0,2],[1,0],[1,1]],
+  // Z shape
+  [[0,0],[0,1],[1,1],[1,2]],
+  // single
+  [[0,0]],
+  // 2-wide
+  [[0,0],[0,1]],
+  // 4-wide
+  [[0,0],[0,1],[0,2],[0,3]],
+  // square
+  [[0,0],[0,1],[1,0],[1,1]],
+];
+
+const MODE_CONFIG: Record<Mode, {
+  slideSpeed: number;   // px/sec the piece slides
+  wallSpeed: number;    // px/sec the wall rises
+  levels: number;
+  stepsToTrophy: number; // successful drops needed per level
+  colors: [number,number,number][];
+  shapesMulti: boolean; // use multi-row shapes
+}> = {
+  easy:    { slideSpeed: 80,  wallSpeed: 40,  levels: 64, stepsToTrophy: 5,  colors: [[99,179,237],[72,187,120],[246,173,85],[154,117,234]], shapesMulti: false },
+  hard:    { slideSpeed: 130, wallSpeed: 70,  levels: 64, stepsToTrophy: 7,  colors: [[239,68,68],[59,130,246],[251,191,36],[52,211,153],[167,139,250]], shapesMulti: true },
+  extreme: { slideSpeed: 200, wallSpeed: 110, levels: 64, stepsToTrophy: 10, colors: [[255,100,100],[100,200,255],[255,220,50],[100,255,180],[220,100,255]], shapesMulti: true },
 };
 
-// Shape colours per mode
-const PALETTE: Record<Mode, [number,number,number][]> = {
-  easy:    [[99,179,237],[72,187,120],[246,173,85],[154,117,234],[244,114,182]],
-  hard:    [[239,68,68],[59,130,246],[251,191,36],[52,211,153],[167,139,250]],
-  extreme: [[255,80,80],[80,200,255],[255,220,50],[100,255,180],[220,100,255],[255,140,50]],
-};
-
-// ── Persistence ──
-interface Progress { unlockedModes: Mode[]; completedModes: Mode[] }
-function loadProgress(): Progress {
-  try { const r = localStorage.getItem("sp2_progress"); if (r) return JSON.parse(r); } catch {}
+function getProgress(): { unlockedModes: Mode[]; completedModes: Mode[] } {
+  try {
+    const raw = localStorage.getItem("stackpack_progress");
+    if (raw) return JSON.parse(raw) as { unlockedModes: Mode[]; completedModes: Mode[] };
+  } catch { /* ignore */ }
   return { unlockedModes: ["easy"], completedModes: [] };
 }
-function saveProgress(p: Progress) {
-  localStorage.setItem("sp2_progress", JSON.stringify(p));
+function saveProgress(p: { unlockedModes: Mode[]; completedModes: Mode[] }) {
+  localStorage.setItem("stackpack_progress", JSON.stringify(p));
 }
 
-// ── Helpers ──
-function normalize(shape: number[][]): number[][] {
-  const minR = Math.min(...shape.map(([r]) => r));
-  const minC = Math.min(...shape.map(([,c]) => c));
-  return shape.map(([r,c]) => [r - minR, c - minC]);
+// Normalize a multi-cell shape so min row=0, min col=0
+function normalizeShape(cells: Cell[]): Cell[] {
+  const minR = Math.min(...cells.map(([r]) => r));
+  const minC = Math.min(...cells.map(([,c]) => c));
+  return cells.map(([r,c]) => [r - minR, c - minC]);
 }
-function shapeWidth(shape: number[][]): number {
-  return Math.max(...shape.map(([,c]) => c)) + 1;
+
+// Get bounding box of a shape
+function shapeBounds(cells: Cell[]): { rows: number; cols: number } {
+  const maxR = Math.max(...cells.map(([r]) => r));
+  const maxC = Math.max(...cells.map(([,c]) => c));
+  return { rows: maxR + 1, cols: maxC + 1 };
 }
-function shapeHeight(shape: number[][]): number {
-  return Math.max(...shape.map(([r]) => r)) + 1;
-}
-// Build wall: a grid of COLS columns, shapeH rows tall.
-// The gap is cut exactly to the shape at gapCol offset.
-// Returns filled[row][col] = true means WALL (not gap)
-function buildWall(shape: number[][], gapCol: number): boolean[][] {
-  const h = shapeHeight(shape);
-  const filled: boolean[][] = [];
-  for (let r = 0; r < h; r++) {
-    const row: boolean[] = [];
+
+// Build wall cells for a given shape placed at anchorCol
+// Wall is full-width minus the gap where the shape fits
+function buildWallCells(shapeCells: Cell[], anchorCol: number, wallRows: number): Cell[] {
+  // The gap is exactly the shape's footprint
+  const gapSet = new Set(shapeCells.map(([r,c]) => `${r},${c + anchorCol}`));
+  const wallCells: Cell[] = [];
+  for (let r = 0; r < wallRows; r++) {
     for (let c = 0; c < COLS; c++) {
-      // Is this cell part of the shape (at gapCol offset)?
-      const isGap = shape.some(([sr, sc]) => sr === r && sc + gapCol === c);
-      row.push(!isGap);
+      if (!gapSet.has(`${r},${c}`)) {
+        wallCells.push([r, c]);
+      }
     }
-    filled.push(row);
   }
-  return filled;
+  return wallCells;
 }
 
 export function startGame(canvas: HTMLCanvasElement, onScore: (n: number) => void): () => void {
@@ -105,506 +120,399 @@ export function startGame(canvas: HTMLCanvasElement, onScore: (n: number) => voi
     pixelDensity: Math.min(window.devicePixelRatio || 1, 2),
   });
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // MENU
-  // ═══════════════════════════════════════════════════════════════════════
+  // ── MENU ─────────────────────────────────────────────────────────────────────
   k.scene("menu", () => {
     onScore(0);
-    const prog = loadProgress();
+    const prog = getProgress();
 
-    // Animated decorative blocks
-    const deco: { x: number; y: number; vy: number; col: [number,number,number] }[] = [];
-    for (let i = 0; i < 12; i++) {
-      deco.push({
-        x: k.rand(0, VW),
-        y: k.rand(0, VH),
-        vy: k.rand(8, 22),
-        col: k.choose([[99,179,237],[72,187,120],[246,173,85],[154,117,234]] as [number,number,number][]),
-      });
-    }
-    const decoObjs = deco.map(d =>
-      k.add([k.rect(CELL-4, CELL-4, { radius: 4 }), k.color(d.col[0], d.col[1], d.col[2]),
-             k.pos(d.x, d.y), k.opacity(0.18)])
-    );
+    k.add([k.text("STACK PACK", { size: 40 }), k.anchor("center"), k.pos(VW/2, 130), k.color(99,179,237)]);
+    k.add([k.text("Drop the shape into the gap!", { size: 13 }), k.anchor("center"), k.pos(VW/2, 174), k.color(160,160,190)]);
+
+    // Animated demo piece sliding
+    let demoX = GRID_X;
+    let demoDir = 1;
+    const demoCells: Cell[] = [[0,0],[0,1],[0,2]];
+    const demoBounds = shapeBounds(demoCells);
+    const demoObjs = demoCells.map(([,dc]) => k.add([
+      k.rect(CELL-2, CELL-2, { radius: 4 }),
+      k.color(99,179,237),
+      k.pos(demoX + dc*CELL + 1, 210),
+      k.opacity(0.85),
+    ]));
     k.onUpdate(() => {
-      deco.forEach((d, i) => {
-        d.y += d.vy * k.dt();
-        if (d.y > VH + CELL) d.y = -CELL;
-        const obj = decoObjs[i];
-        if (obj) obj.pos.y = d.y;
+      demoX += demoDir * 60 * k.dt();
+      if (demoX + demoBounds.cols * CELL > GRID_X + COLS * CELL) demoDir = -1;
+      if (demoX < GRID_X) demoDir = 1;
+      demoObjs.forEach((o, i) => {
+        const dc = demoCells[i]![1];
+        o.pos.x = demoX + dc * CELL + 1;
       });
     });
 
-    k.add([k.text("STACK PACK", { size: 42, font: "monospace" }),
-           k.anchor("center"), k.pos(VW/2, 130), k.color(99,179,237)]);
-    k.add([k.text("Drop the shape into the gap!", { size: 13 }),
-           k.anchor("center"), k.pos(VW/2, 176), k.color(160,160,190)]);
+    const modes: Mode[] = ["easy", "hard", "extreme"];
+    const modeColors: Record<Mode, [number,number,number]> = {
+      easy:    [72,187,120],
+      hard:    [246,173,85],
+      extreme: [239,68,68],
+    };
+    const modeLabels: Record<Mode, string> = {
+      easy:    "EASY — 64 levels",
+      hard:    "HARD — 64 levels",
+      extreme: "EXTREME — 64 levels",
+    };
 
-    const modes: Mode[] = ["easy","hard","extreme"];
     modes.forEach((mode, i) => {
-      const cfg = MODE_CFG[mode];
       const unlocked = prog.unlockedModes.includes(mode);
       const completed = prog.completedModes.includes(mode);
-      const y = 270 + i * 90;
-      const [r,g,b] = unlocked ? cfg.color : [50,50,70] as [number,number,number];
+      const y = 300 + i * 76;
+      const col = unlocked ? modeColors[mode] : [50,50,70] as [number,number,number];
 
       const btn = k.add([
-        k.rect(270, 58, { radius: 12 }), k.color(r,g,b),
-        k.anchor("center"), k.pos(VW/2, y),
-        k.opacity(unlocked ? 1 : 0.4), k.area(),
+        k.rect(270, 54, { radius: 12 }),
+        k.color(...col),
+        k.anchor("center"),
+        k.pos(VW/2, y),
+        k.opacity(unlocked ? 1 : 0.4),
+        k.area(),
       ]);
       k.add([
-        k.text(
-          completed ? `✓ ${cfg.label}  (${LEVELS_PER_MODE} levels)` :
-          unlocked  ? `${cfg.label}  (${LEVELS_PER_MODE} levels)` :
-                      `🔒 ${cfg.label}`,
-          { size: 16 }
-        ),
-        k.anchor("center"), k.pos(VW/2, y), k.color(255,255,255),
+        k.text((completed ? "✓ " : unlocked ? "" : "🔒 ") + modeLabels[mode], { size: 15 }),
+        k.anchor("center"),
+        k.pos(VW/2, y),
+        k.color(255,255,255),
       ]);
-
       if (unlocked) btn.onClick(() => k.go("play", { mode, level: 1, totalScore: 0 }));
     });
 
-    k.add([k.text("← → or drag  |  SPACE / tap = drop  |  double = instant", { size: 10 }),
-           k.anchor("center"), k.pos(VW/2, VH - 24), k.color(80,80,110)]);
+    k.add([
+      k.text("SPACE or tap = drop", { size: 11 }),
+      k.anchor("center"),
+      k.pos(VW/2, VH - 22),
+      k.color(80,80,110),
+    ]);
   });
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // GAME OVER
-  // ═══════════════════════════════════════════════════════════════════════
-  k.scene("over", (d: { mode: Mode; level: number; totalScore: number }) => {
+  // ── GAME OVER ────────────────────────────────────────────────────────────────
+  k.scene("over", (d: { score: number; mode: Mode; level: number }) => {
     k.add([k.rect(VW,VH), k.color(12,12,22), k.pos(0,0)]);
-    k.add([k.text("GAME OVER", { size: 44, font: "monospace" }),
-           k.anchor("center"), k.pos(VW/2, 190), k.color(239,68,68)]);
-    k.add([k.text(`${MODE_CFG[d.mode].label}  —  Level ${d.level}`, { size: 18 }),
-           k.anchor("center"), k.pos(VW/2, 252), k.color(160,160,190)]);
-    k.add([k.text(`Score: ${d.totalScore}`, { size: 22 }),
-           k.anchor("center"), k.pos(VW/2, 296), k.color(99,179,237)]);
+    k.add([k.text("MISSED!", { size: 48 }), k.anchor("center"), k.pos(VW/2, 190), k.color(239,68,68)]);
+    k.add([k.text(`${d.mode.toUpperCase()} — Level ${d.level}`, { size: 17 }), k.anchor("center"), k.pos(VW/2, 252), k.color(160,160,190)]);
+    k.add([k.text(`Score: ${d.score}`, { size: 22 }), k.anchor("center"), k.pos(VW/2, 292), k.color(99,179,237)]);
 
-    const retry = k.add([k.rect(210,56,{radius:12}), k.color(239,68,68),
-                          k.anchor("center"), k.pos(VW/2, 390), k.area()]);
-    k.add([k.text("Try Again", { size: 19 }), k.anchor("center"), k.pos(VW/2, 390), k.color(255,255,255)]);
+    const retry = k.add([k.rect(200,52,{radius:10}), k.color(239,68,68), k.anchor("center"), k.pos(VW/2, 390), k.area()]);
+    k.add([k.text("Try Again", { size: 18 }), k.anchor("center"), k.pos(VW/2, 390), k.color(255,255,255)]);
     retry.onClick(() => k.go("play", { mode: d.mode, level: d.level, totalScore: 0 }));
 
-    const menu = k.add([k.rect(210,56,{radius:12}), k.color(50,50,80),
-                          k.anchor("center"), k.pos(VW/2, 462), k.area()]);
-    k.add([k.text("Menu", { size: 19 }), k.anchor("center"), k.pos(VW/2, 462), k.color(200,200,220)]);
+    const menu = k.add([k.rect(200,52,{radius:10}), k.color(50,50,80), k.anchor("center"), k.pos(VW/2, 458), k.area()]);
+    k.add([k.text("Menu", { size: 18 }), k.anchor("center"), k.pos(VW/2, 458), k.color(200,200,220)]);
     menu.onClick(() => k.go("menu"));
     k.onKeyPress("space", () => k.go("play", { mode: d.mode, level: d.level, totalScore: 0 }));
   });
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // LEVEL COMPLETE
-  // ═══════════════════════════════════════════════════════════════════════
+  // ── LEVEL COMPLETE ───────────────────────────────────────────────────────────
   k.scene("levelcomplete", (d: { mode: Mode; level: number; totalScore: number }) => {
-    k.add([k.rect(VW,VH), k.color(12,12,22), k.pos(0,0)]);
+    const cfg = MODE_CONFIG[d.mode];
+    const prog = getProgress();
+    const modesDone = d.level >= cfg.levels;
 
-    const isLastLevel = d.level >= LEVELS_PER_MODE;
-    const modeOrder: Mode[] = ["easy","hard","extreme"];
-    const modeIdx = modeOrder.indexOf(d.mode);
-
-    if (isLastLevel) {
-      const prog = loadProgress();
+    if (modesDone) {
       if (!prog.completedModes.includes(d.mode)) prog.completedModes.push(d.mode);
-      const nextMode = modeOrder[modeIdx + 1];
+      const order: Mode[] = ["easy","hard","extreme"];
+      const nextMode = order[order.indexOf(d.mode) + 1];
       if (nextMode && !prog.unlockedModes.includes(nextMode)) prog.unlockedModes.push(nextMode);
       saveProgress(prog);
-      const allDone = prog.completedModes.length === 3;
-
-      if (allDone) {
-        k.go("allclear", d.totalScore);
-        return;
-      }
-
-      k.add([k.text("MODE COMPLETE!", { size: 36, font: "monospace" }),
-             k.anchor("center"), k.pos(VW/2, 180), k.color(251,191,36)]);
-      k.add([k.text(`🔓 ${MODE_CFG[nextMode!].label} UNLOCKED!`, { size: 20 }),
-             k.anchor("center"), k.pos(VW/2, 240), k.color(154,117,234)]);
-      k.add([k.text(`Score: ${d.totalScore}`, { size: 18 }),
-             k.anchor("center"), k.pos(VW/2, 288), k.color(99,179,237)]);
-
-      const btn = k.add([k.rect(230,58,{radius:12}), k.color(72,187,120),
-                          k.anchor("center"), k.pos(VW/2, 400), k.area()]);
-      k.add([k.text("Back to Menu", { size: 18 }), k.anchor("center"), k.pos(VW/2, 400), k.color(255,255,255)]);
-      btn.onClick(() => k.go("menu"));
-      k.onKeyPress("space", () => k.go("menu"));
-    } else {
-      k.add([k.text("LEVEL CLEAR!", { size: 40, font: "monospace" }),
-             k.anchor("center"), k.pos(VW/2, 190), k.color(251,191,36)]);
-      k.add([k.text(`${MODE_CFG[d.mode].label}  —  Level ${d.level} / ${LEVELS_PER_MODE}`, { size: 16 }),
-             k.anchor("center"), k.pos(VW/2, 250), k.color(160,160,200)]);
-      k.add([k.text(`Score: ${d.totalScore}`, { size: 18 }),
-             k.anchor("center"), k.pos(VW/2, 292), k.color(99,179,237)]);
-
-      // Trophy preview
-      k.add([k.text("🏆", { size: 52 }), k.anchor("center"), k.pos(VW/2, 370)]);
-
-      const btn = k.add([k.rect(230,58,{radius:12}), k.color(72,187,120),
-                          k.anchor("center"), k.pos(VW/2, 460), k.area()]);
-      k.add([k.text("Next Level →", { size: 19 }), k.anchor("center"), k.pos(VW/2, 460), k.color(255,255,255)]);
-      btn.onClick(() => k.go("play", { mode: d.mode, level: d.level + 1, totalScore: d.totalScore }));
-      k.onKeyPress("space", () => k.go("play", { mode: d.mode, level: d.level + 1, totalScore: d.totalScore }));
     }
+
+    const allDone = prog.completedModes.length === 3;
+
+    k.add([k.rect(VW,VH), k.color(12,12,22), k.pos(0,0)]);
+    k.add([k.text("🏆", { size: 60 }), k.anchor("center"), k.pos(VW/2, 160)]);
+    k.add([k.text(modesDone ? "MODE COMPLETE!" : "LEVEL CLEAR!", { size: 32 }), k.anchor("center"), k.pos(VW/2, 230), k.color(251,191,36)]);
+    k.add([k.text(`${d.mode.toUpperCase()} — Level ${d.level}/${cfg.levels}`, { size: 16 }), k.anchor("center"), k.pos(VW/2, 272), k.color(160,160,190)]);
+    k.add([k.text(`Total Score: ${d.totalScore}`, { size: 18 }), k.anchor("center"), k.pos(VW/2, 308), k.color(99,179,237)]);
+
+    if (modesDone) {
+      const order: Mode[] = ["easy","hard","extreme"];
+      const nextMode = order[order.indexOf(d.mode) + 1];
+      k.add([
+        k.text(allDone ? "🎉 ALL MODES DONE!" : `🔓 ${(nextMode ?? "").toUpperCase()} UNLOCKED!`, { size: 16 }),
+        k.anchor("center"), k.pos(VW/2, 350), k.color(154,117,234),
+      ]);
+    }
+
+    const btnLabel = allDone ? "Play Again" : modesDone ? "Back to Menu" : "Next Level";
+    const btn = k.add([k.rect(220,54,{radius:12}), k.color(72,187,120), k.anchor("center"), k.pos(VW/2, 440), k.area()]);
+    k.add([k.text(btnLabel, { size: 18 }), k.anchor("center"), k.pos(VW/2, 440), k.color(255,255,255)]);
+
+    btn.onClick(() => {
+      if (allDone) { saveProgress({ unlockedModes: ["easy"], completedModes: [] }); k.go("menu"); }
+      else if (modesDone) k.go("menu");
+      else k.go("play", { mode: d.mode, level: d.level + 1, totalScore: d.totalScore });
+    });
+    k.onKeyPress("space", () => {
+      if (allDone) { saveProgress({ unlockedModes: ["easy"], completedModes: [] }); k.go("menu"); }
+      else if (modesDone) k.go("menu");
+      else k.go("play", { mode: d.mode, level: d.level + 1, totalScore: d.totalScore });
+    });
   });
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // ALL CLEAR
-  // ═══════════════════════════════════════════════════════════════════════
-  k.scene("allclear", (finalScore: number) => {
-    k.add([k.rect(VW,VH), k.color(10,10,20), k.pos(0,0)]);
-    k.add([k.text("🏆 YOU WIN! 🏆", { size: 34, font: "monospace" }),
-           k.anchor("center"), k.pos(VW/2, 160), k.color(251,191,36)]);
-    k.add([k.text("All 3 modes complete!", { size: 18 }),
-           k.anchor("center"), k.pos(VW/2, 216), k.color(200,200,220)]);
-    k.add([k.text(`Total Score: ${finalScore}`, { size: 22 }),
-           k.anchor("center"), k.pos(VW/2, 262), k.color(99,179,237)]);
-    k.add([k.text("🎉 STACK PACK 2 unlocked!", { size: 17 }),
-           k.anchor("center"), k.pos(VW/2, 320), k.color(154,117,234)]);
-    k.add([k.text("(Coming soon — stay tuned!)", { size: 12 }),
-           k.anchor("center"), k.pos(VW/2, 350), k.color(90,90,120)]);
-
-    const btn = k.add([k.rect(220,58,{radius:12}), k.color(72,187,120),
-                        k.anchor("center"), k.pos(VW/2, 450), k.area()]);
-    k.add([k.text("Play Again", { size: 19 }), k.anchor("center"), k.pos(VW/2, 450), k.color(255,255,255)]);
-    btn.onClick(() => { saveProgress({ unlockedModes:["easy"], completedModes:[] }); k.go("menu"); });
-    k.onKeyPress("space", () => { saveProgress({ unlockedModes:["easy"], completedModes:[] }); k.go("menu"); });
-  });
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // PLAY SCENE — the real game
-  // ═══════════════════════════════════════════════════════════════════════
-  k.scene("play", (data: { mode: Mode; level: number; totalScore: number }) => {
-    const { mode, level } = data;
-    let totalScore = data.totalScore;
-    const cfg = MODE_CFG[mode];
-    const palette = PALETTE[mode];
-
-    // ── Pick a shape for this round ──
-    // Level seeds the shape so it changes each level but is consistent
-    const shapeIdx = (level - 1) % SHAPES.length;
-    const shape = normalize(SHAPES[shapeIdx]!);
-    const sW = shapeWidth(shape);
-    const sH = shapeHeight(shape);
-
-    // ── Progress: how many successful fits to reach trophy ──
-    // Easy: 5 fits, Hard: 7, Extreme: 10. Scales with level.
-    const fitsNeeded = Math.min(5 + Math.floor((level - 1) / 8), 12) +
-      (mode === "hard" ? 2 : mode === "extreme" ? 5 : 0);
-    let fitsCount = 0;
-
-    // ── Wall speed increases slightly each level ──
-    const wallSpeed = cfg.wallSpeed * (1 + (level - 1) * 0.04);
-    const pieceSpeed = cfg.pieceSpeed; // cells per second (left-right)
-
-    // ── Colour ──
-    const colIdx = (level - 1) % palette.length;
-    const [pr, pg, pb] = palette[colIdx]!;
-
-    // ── State ──
+  // ── PLAY SCENE ───────────────────────────────────────────────────────────────
+  k.scene("play", (d: { mode: Mode; level: number; totalScore: number }) => {
+    const cfg = MODE_CONFIG[d.mode];
+    let score = d.totalScore;
+    let steps = 0; // successful drops this level
     let gameActive = true;
-    let pieceCol = Math.floor((COLS - sW) / 2); // left column of piece
-    let pieceDir = 1;  // 1=right, -1=left
-    let pieceMoveAcc = 0; // accumulator for smooth side movement
+    let dropping = false;
+    onScore(score);
 
-    // Wall state: the wall slides up from the bottom
-    // wallY = pixel Y of the TOP of the wall block (starts at VH, moves to PLAY_TOP)
-    let wallY = VH + 10;
-    let gapCol = Math.floor(k.rand(0, COLS - sW + 1)); // where the gap is
-    let wallFilled = buildWall(shape, gapCol);
-
-    let lastSpaceTime = -999;
-    let dropping = false;   // piece is animating downward
-    let dropY = 0;          // current pixel Y of dropping piece
-    const DROP_SPEED = 700; // px/sec for drop animation
-
-    onScore(totalScore);
-
-    // ── Trophy position (pixel Y inside play area) ──
-    // Trophy sits near the top; progress bar fills as fits increase
-    const TROPHY_Y = PLAY_TOP + 48;
-    const PIECE_START_Y = PLAY_TOP + 8; // where piece sits at top
-
-    // ── HUD ──
-    // Background bar
-    k.add([k.rect(VW, PLAY_TOP), k.color(10,10,20), k.pos(0,0)]);
-
-    // Mode + level
-    k.add([k.text(`${cfg.label}  Lv.${level}`, { size: 13 }),
-           k.pos(8, 8), k.color(160,160,200)]);
-
-    // Score
-    const scoreLbl = k.add([k.text(`${totalScore}`, { size: 16 }),
-                             k.anchor("top"), k.pos(VW/2, 6), k.color(99,179,237)]);
-
-    // Progress: "fits X / Y"
-    const progressLbl = k.add([k.text(`${fitsCount}/${fitsNeeded}`, { size: 13 }),
-                                k.anchor("topright"), k.pos(VW - 8, 8), k.color(251,191,36)]);
-
-    // Trophy emoji at the top of play area
-    k.add([k.text("🏆", { size: 28 }), k.anchor("center"), k.pos(VW/2, TROPHY_Y)]);
-
-    // Progress bar (horizontal, below HUD)
-    const PBAR_X = GRID_X;
-    const PBAR_W = COLS * CELL;
-    const PBAR_Y = PLAY_TOP + 2;
-    k.add([k.rect(PBAR_W, 6, { radius: 3 }), k.color(30,30,60), k.pos(PBAR_X, PBAR_Y)]);
-    const pbarFill = k.add([k.rect(1, 6, { radius: 3 }), k.color(251,191,36), k.pos(PBAR_X, PBAR_Y)]);
-
-    // Grid lines (faint)
-    for (let c = 0; c <= COLS; c++) {
-      k.add([k.rect(1, PLAY_H), k.color(25,25,45), k.pos(GRID_X + c*CELL, PLAY_TOP)]);
+    // ── Pick a random shape ──────────────────────────────────────────────────
+    function pickShape(): Cell[] {
+      if (cfg.shapesMulti) {
+        const idx = Math.floor(k.rand(0, SHAPES_MULTI.length - 0.01));
+        return normalizeShape([...(SHAPES_MULTI[idx] ?? [[0,0]])]);
+      } else {
+        const idx = Math.floor(k.rand(0, SHAPES.length - 0.01));
+        const cols = SHAPES[idx] ?? [0];
+        return cols.map(c => [0, c] as Cell);
+      }
     }
 
-    // Separator line under HUD
-    k.add([k.rect(VW, 2), k.color(40,40,70), k.pos(0, PLAY_TOP)]);
+    // ── State ────────────────────────────────────────────────────────────────
+    let shape = pickShape();
+    let bounds = shapeBounds(shape);
 
-    // ── Draw piece at top (slides left/right) ──
-    // We'll recreate piece cells every frame
-    type GO = ReturnType<typeof k.add>;
-    let pieceObjs: GO[] = [];
+    // anchorCol: leftmost column the shape occupies (0..COLS-bounds.cols)
+    let anchorCol = Math.floor((COLS - bounds.cols) / 2);
+    let slideDir = 1; // 1=right, -1=left
+    let slideX = GRID_X + anchorCol * CELL; // pixel x of anchor
 
-    function drawPiece() {
+    // Gap col: where the wall gap is (matches shape)
+    let gapCol = anchorCol; // initially same position as shape
+
+    // Wall y position (rises from bottom)
+    let wallY = WALL_START_Y;
+    const wallRows = bounds.rows;
+
+    // Progress: how far the wall has risen toward the piece (0..1)
+    // Trophy is at TROPHY_Y, wall starts at WALL_START_Y
+    const trophyLineY = HUD_H + 10;
+    const wallTravelTotal = WALL_START_Y - (PIECE_Y + wallRows * CELL + 20);
+
+    // ── Drawing helpers ──────────────────────────────────────────────────────
+    const pieceColor = cfg.colors[Math.floor(k.rand(0, cfg.colors.length - 0.01))] ?? [99,179,237];
+    const wallColor: [number,number,number] = [70,70,110];
+
+    // Grid background lines
+    for (let c = 0; c <= COLS; c++) {
+      k.add([k.rect(1, VH), k.color(22,22,38), k.pos(GRID_X + c*CELL, 0)]);
+    }
+
+    // HUD
+    k.add([k.rect(VW, HUD_H), k.color(8,8,18), k.pos(0,0)]);
+    k.add([k.text(`${d.mode.toUpperCase()}  Lv.${d.level}`, { size: 13 }), k.pos(10, 8), k.color(160,160,200)]);
+    const scoreLbl = k.add([k.text(`${score}`, { size: 18 }), k.anchor("top"), k.pos(VW/2, 6), k.color(251,191,36)]);
+
+    // Trophy progress bar (horizontal, below HUD)
+    const barW = COLS * CELL;
+    k.add([k.rect(barW, 10, { radius: 5 }), k.color(25,25,45), k.pos(GRID_X, HUD_H + 2)]);
+    const progressBar = k.add([k.rect(4, 10, { radius: 5 }), k.color(251,191,36), k.pos(GRID_X, HUD_H + 2)]);
+
+    // Trophy icon at right end of bar
+    k.add([k.text("🏆", { size: 18 }), k.anchor("center"), k.pos(GRID_X + barW + 14, HUD_H + 7)]);
+
+    // Instruction (fades after 3s)
+    const hint = k.add([
+      k.text("SPACE / tap to drop", { size: 11 }),
+      k.anchor("center"), k.pos(VW/2, VH - 16), k.color(80,80,110),
+    ]);
+    k.wait(3, () => { if (hint.exists()) k.destroy(hint); });
+
+    // ── Piece visual objects ─────────────────────────────────────────────────
+    // We rebuild piece cells every frame based on slideX
+    let pieceObjs: ReturnType<typeof k.add>[] = [];
+
+    function rebuildPiece() {
       pieceObjs.forEach(o => { if (o.exists()) k.destroy(o); });
       pieceObjs = [];
-      if (!gameActive) return;
-
-      const baseY = dropping ? dropY : PIECE_START_Y;
-
-      shape.forEach(([sr, sc]) => {
-        const px = GRID_X + (pieceCol + sc) * CELL + 2;
-        const py = baseY + sr * CELL + 2;
-        if (py > VH) return;
-        const obj = k.add([
-          k.rect(CELL - 4, CELL - 4, { radius: 5 }),
-          k.color(pr, pg, pb),
-          k.pos(px, py),
-          k.opacity(dropping ? 0.85 : 1),
-        ]);
-        // Bright border highlight
-        k.add([
-          k.rect(CELL - 4, CELL - 4, { radius: 5 }),
-          k.color(Math.min(pr+60,255), Math.min(pg+60,255), Math.min(pb+60,255)),
-          k.pos(px, py),
-          k.opacity(0.25),
-        ]);
-        pieceObjs.push(obj);
+      shape.forEach(([dr, dc]) => {
+        const px = slideX + dc * CELL + 1;
+        const py = PIECE_Y + dr * CELL + 1;
+        if (py > HUD_H) {
+          pieceObjs.push(k.add([
+            k.rect(CELL-2, CELL-2, { radius: 5 }),
+            k.color(...pieceColor),
+            k.pos(px, py),
+            k.opacity(1),
+          ]));
+        }
       });
     }
 
-    // ── Draw wall ──
-    let wallObjs: GO[] = [];
+    // ── Wall visual objects ──────────────────────────────────────────────────
+    let wallObjs: ReturnType<typeof k.add>[] = [];
 
-    function drawWall() {
+    function rebuildWall() {
       wallObjs.forEach(o => { if (o.exists()) k.destroy(o); });
       wallObjs = [];
-
-      wallFilled.forEach((row, r) => {
-        row.forEach((filled, c) => {
-          if (!filled) return; // gap — don't draw
-          const px = GRID_X + c * CELL + 2;
-          const py = wallY + r * CELL + 2;
-          if (py > VH + CELL || py < PLAY_TOP - CELL) return;
-          wallObjs.push(k.add([
-            k.rect(CELL - 4, CELL - 4, { radius: 4 }),
-            k.color(70, 75, 115),
-            k.pos(px, py),
-            k.opacity(0.92),
-          ]));
-          // Subtle highlight on top edge
-          wallObjs.push(k.add([
-            k.rect(CELL - 4, 3),
-            k.color(110, 115, 160),
-            k.pos(px, py),
-            k.opacity(0.5),
-          ]));
-        });
-      });
+      // Build gap set: cells that are the gap (where shape fits)
+      const gapSet = new Set(shape.map(([r,c]) => `${r},${c + gapCol}`));
+      for (let r = 0; r < wallRows; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (!gapSet.has(`${r},${c}`)) {
+            wallObjs.push(k.add([
+              k.rect(CELL-2, CELL-2, { radius: 3 }),
+              k.color(...wallColor),
+              k.pos(GRID_X + c*CELL + 1, wallY + r*CELL + 1),
+              k.opacity(0.95),
+            ]));
+          }
+        }
+      }
     }
 
-    // Ghost: show where piece would land in the gap
-    let ghostObjs: GO[] = [];
-    function drawGhost() {
-      ghostObjs.forEach(o => { if (o.exists()) k.destroy(o); });
-      ghostObjs = [];
+    // ── Drop animation ───────────────────────────────────────────────────────
+    let dropY = PIECE_Y; // current y of piece during drop
+    let dropTargetY = 0;
+
+    function startDrop() {
       if (!gameActive || dropping) return;
-
-      // Ghost shows piece aligned to gap
-      const ghostCol = gapCol;
-      const ghostY = wallY - 4;
-
-      shape.forEach(([sr, sc]) => {
-        const px = GRID_X + (ghostCol + sc) * CELL + 2;
-        const py = ghostY + sr * CELL + 2;
-        if (py > VH || py < PLAY_TOP) return;
-        ghostObjs.push(k.add([
-          k.rect(CELL - 4, CELL - 4, { radius: 5 }),
-          k.color(pr, pg, pb),
-          k.pos(px, py),
-          k.opacity(0.12),
-        ]));
-      });
+      dropping = true;
+      dropY = PIECE_Y;
+      // Target: piece lands at the wall's top row
+      dropTargetY = wallY - 4;
     }
 
-    // ── Reset round: new gap position, wall back to bottom ──
-    function resetRound() {
+    function settleDrop() {
       dropping = false;
-      wallY = VH + 10;
-      gapCol = Math.floor(k.rand(0, COLS - sW + 1));
-      wallFilled = buildWall(shape, gapCol);
-      pieceDir = k.choose([1, -1]) as 1 | -1;
-    }
 
-    // ── Drop the piece ──
-    function dropPiece() {
-      if (!gameActive || dropping) return;
-      dropping = true;
-      dropY = PIECE_START_Y;
-    }
+      // Check if piece fits: anchorCol (from slideX) must match gapCol
+      const currentAnchorCol = Math.round((slideX - GRID_X) / CELL);
 
-    function instantDrop() {
-      if (!gameActive || dropping) return;
-      dropping = true;
-      // Snap piece to just above wall
-      dropY = wallY - sH * CELL - 4;
-      if (dropY < PIECE_START_Y) dropY = PIECE_START_Y;
-    }
+      if (currentAnchorCol === gapCol) {
+        // ✅ PERFECT FIT
+        score += shape.length; // 1 point per block cell
+        steps++;
+        onScore(score);
 
-    // ── Check fit when dropping piece reaches wall ──
-    function checkFit(): boolean {
-      // Perfect fit: pieceCol === gapCol
-      return pieceCol === gapCol;
-    }
+        // Flash green
+        pieceObjs.forEach(o => { if (o.exists()) { o.color = k.rgb(72,187,120); } });
 
-    // Flash effect on hit/miss
-    function flashScreen(success: boolean) {
-      const overlay = k.add([
-        k.rect(VW, VH), k.pos(0,0),
-        k.color(success ? 72 : 239, success ? 187 : 68, success ? 120 : 68),
-        k.opacity(0.35),
-      ]);
-      k.wait(0.15, () => { if (overlay.exists()) k.destroy(overlay); });
-    }
+        k.wait(0.35, () => {
+          if (!gameActive) return;
 
-    // ── Input ──
-    k.onKeyDown("left", () => {
-      if (!gameActive || dropping) return;
-      if (pieceCol > 0) pieceCol--;
-    });
-    k.onKeyDown("right", () => {
-      if (!gameActive || dropping) return;
-      if (pieceCol + sW < COLS) pieceCol++;
-    });
+          // Check level complete
+          if (steps >= cfg.stepsToTrophy) {
+            gameActive = false;
+            k.go("levelcomplete", { mode: d.mode, level: d.level, totalScore: score });
+            return;
+          }
 
-    k.onKeyPress("space", () => {
-      if (!gameActive) return;
-      const now = k.time();
-      if (now - lastSpaceTime < 0.35) {
-        instantDrop();
+          // New shape + reset wall
+          shape = pickShape();
+          bounds = shapeBounds(shape);
+          anchorCol = Math.floor((COLS - bounds.cols) / 2);
+          slideX = GRID_X + anchorCol * CELL;
+          slideDir = 1;
+          gapCol = anchorCol;
+          wallY = WALL_START_Y;
+          dropY = PIECE_Y;
+          rebuildPiece();
+          rebuildWall();
+        });
       } else {
-        lastSpaceTime = now;
-        dropPiece();
+        // ❌ MISSED — game over
+        gameActive = false;
+        // Flash red
+        pieceObjs.forEach(o => { if (o.exists()) o.color = k.rgb(239,68,68); });
+        k.wait(0.5, () => k.go("over", { score, mode: d.mode, level: d.level }));
       }
-    });
+    }
 
-    // Tap / click
-    let lastTapTime = -999;
-    k.onMousePress(() => {
-      if (!gameActive) return;
-      const now = k.time();
-      if (now - lastTapTime < 0.35) {
-        instantDrop();
-      } else {
-        lastTapTime = now;
-        dropPiece();
-      }
-    });
+    // ── Input ────────────────────────────────────────────────────────────────
+    let lastTap = -999;
 
-    // Touch drag to move piece
-    let touchStartX = 0;
-    k.onTouchStart((pos) => { touchStartX = pos.x; });
-    k.onTouchMove((pos) => {
+    function handleDrop() {
       if (!gameActive || dropping) return;
-      const dx = pos.x - touchStartX;
-      if (Math.abs(dx) > CELL * 0.55) {
-        if (dx > 0 && pieceCol + sW < COLS) pieceCol++;
-        if (dx < 0 && pieceCol > 0) pieceCol--;
-        touchStartX = pos.x;
+      const now = k.time();
+      // Double-tap / double-space = instant drop (wall jumps to piece)
+      if (now - lastTap < 0.35) {
+        // Instant: snap wall to piece position
+        wallY = PIECE_Y + bounds.rows * CELL + 8;
+        startDrop();
+      } else {
+        lastTap = now;
+        startDrop();
       }
-    });
+    }
 
-    // ── Main update ──
+    k.onKeyPress("space", handleDrop);
+    k.onMousePress(handleDrop);
+    k.onTouchStart(handleDrop);
+
+    // ── Main loop ────────────────────────────────────────────────────────────
     k.onUpdate(() => {
       if (!gameActive) return;
       const dt = k.dt();
 
-      // Auto-slide piece left/right
-      if (!dropping) {
-        pieceMoveAcc += pieceSpeed * dt;
-        while (pieceMoveAcc >= CELL) {
-          pieceMoveAcc -= CELL;
-          pieceCol += pieceDir;
-          if (pieceCol + sW >= COLS) { pieceCol = COLS - sW; pieceDir = -1; }
-          if (pieceCol <= 0) { pieceCol = 0; pieceDir = 1; }
-        }
-      }
-
-      // Wall scrolls up
-      wallY -= wallSpeed * dt;
-
-      // Drop animation
       if (dropping) {
-        dropY += DROP_SPEED * dt;
-
-        // Has the piece reached the wall?
-        const pieceBottom = dropY + sH * CELL;
-        if (pieceBottom >= wallY) {
-          // Resolve
-          const fit = checkFit();
-          flashScreen(fit);
-
-          if (fit) {
-            fitsCount++;
-            totalScore += shape.length; // 1 point per block cell
-            onScore(totalScore);
-
-            // Update HUD
-            scoreLbl.text = `${totalScore}`;
-            progressLbl.text = `${fitsCount}/${fitsNeeded}`;
-            pbarFill.width = Math.max(1, (fitsCount / fitsNeeded) * PBAR_W);
-
-            if (fitsCount >= fitsNeeded) {
-              // Level complete!
-              gameActive = false;
-              k.wait(0.4, () => k.go("levelcomplete", { mode, level, totalScore }));
-              return;
-            }
-            resetRound();
-          } else {
-            // Miss — game over
-            gameActive = false;
-            k.wait(0.4, () => k.go("over", { mode, level, totalScore }));
-            return;
-          }
+        // Piece falls toward wall
+        dropY += 500 * dt;
+        if (dropY >= dropTargetY) {
+          dropY = dropTargetY;
+          settleDrop();
         }
-      }
-
-      // Wall scrolled past top — game over (ran out of time)
-      if (wallY + sH * CELL < PLAY_TOP && !dropping) {
-        gameActive = false;
-        k.wait(0.3, () => k.go("over", { mode, level, totalScore }));
+        // Render dropping piece
+        pieceObjs.forEach(o => { if (o.exists()) k.destroy(o); });
+        pieceObjs = [];
+        shape.forEach(([dr, dc]) => {
+          const px = slideX + dc * CELL + 1;
+          const py = dropY + dr * CELL + 1;
+          if (py > HUD_H && py < VH) {
+            pieceObjs.push(k.add([
+              k.rect(CELL-2, CELL-2, { radius: 5 }),
+              k.color(...pieceColor),
+              k.pos(px, py),
+            ]));
+          }
+        });
         return;
       }
 
-      // Redraw
-      drawGhost();
-      drawWall();
-      drawPiece();
+      // Slide piece left/right
+      slideX += slideDir * cfg.slideSpeed * dt;
+      const maxX = GRID_X + (COLS - bounds.cols) * CELL;
+      if (slideX >= maxX) { slideX = maxX; slideDir = -1; }
+      if (slideX <= GRID_X) { slideX = GRID_X; slideDir = 1; }
+
+      // Update anchorCol for gap alignment hint
+      anchorCol = Math.round((slideX - GRID_X) / CELL);
+
+      // Wall rises from bottom
+      wallY -= cfg.wallSpeed * dt;
+
+      // If wall reaches the piece — auto miss (ran out of time)
+      if (wallY <= PIECE_Y + bounds.rows * CELL + 4) {
+        gameActive = false;
+        pieceObjs.forEach(o => { if (o.exists()) o.color = k.rgb(239,68,68); });
+        k.wait(0.4, () => k.go("over", { score, mode: d.mode, level: d.level }));
+        return;
+      }
+
+      // Progress bar
+      const progress = 1 - Math.max(0, (wallY - (PIECE_Y + bounds.rows * CELL + 4)) / wallTravelTotal);
+      const stepsProgress = steps / cfg.stepsToTrophy;
+      const totalProgress = Math.min(1, (stepsProgress * (cfg.stepsToTrophy - 1) / cfg.stepsToTrophy) + (progress / cfg.stepsToTrophy));
+      progressBar.width = Math.max(4, totalProgress * barW);
+
+      scoreLbl.text = `${score}`;
+
+      rebuildPiece();
+      rebuildWall();
     });
 
     // Initial draw
-    drawWall();
-    drawPiece();
+    rebuildPiece();
+    rebuildWall();
   });
 
   k.go("menu");
