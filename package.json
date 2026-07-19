@@ -1,14 +1,14 @@
 {
-  "name": "APPNAME",
+  "name": "stack-pack",
   "private": true,
   "packageManager": "pnpm@10.30.3",
   "engines": { "node": ">=22" },
   "pnpm": { "onlyBuiltDependencies": ["esbuild"] },
   "scripts": {
-    "dev": "pnpm --filter @APPNAME/web dev",
-    "build": "pnpm --filter @APPNAME/web build",
-    "preview": "pnpm --filter @APPNAME/web preview",
-    "typecheck": "pnpm --filter @APPNAME/web exec tsc -b",
-    "test": "pnpm --filter @APPNAME/web test"
+    "dev": "pnpm --filter @stack-pack/web dev",
+    "build": "pnpm --filter @stack-pack/web build",
+    "preview": "pnpm --filter @stack-pack/web preview",
+    "typecheck": "pnpm --filter @stack-pack/web exec tsc -b",
+    "test": "pnpm --filter @stack-pack/web test"
   }
 }
