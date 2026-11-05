@@ -1,4 +1,5 @@
 import kaplay from "kaplay";
+import type { ColorComp, GameObj } from "kaplay";
 
 const VW = 400;
 const VH = 640;
@@ -91,22 +92,6 @@ function shapeBounds(cells: Cell[]): { rows: number; cols: number } {
   const maxR = Math.max(...cells.map(([r]) => r));
   const maxC = Math.max(...cells.map(([,c]) => c));
   return { rows: maxR + 1, cols: maxC + 1 };
-}
-
-// Build wall cells for a given shape placed at anchorCol
-// Wall is full-width minus the gap where the shape fits
-function buildWallCells(shapeCells: Cell[], anchorCol: number, wallRows: number): Cell[] {
-  // The gap is exactly the shape's footprint
-  const gapSet = new Set(shapeCells.map(([r,c]) => `${r},${c + anchorCol}`));
-  const wallCells: Cell[] = [];
-  for (let r = 0; r < wallRows; r++) {
-    for (let c = 0; c < COLS; c++) {
-      if (!gapSet.has(`${r},${c}`)) {
-        wallCells.push([r, c]);
-      }
-    }
-  }
-  return wallCells;
 }
 
 export function startGame(canvas: HTMLCanvasElement, onScore: (n: number) => void): () => void {
@@ -295,7 +280,6 @@ export function startGame(canvas: HTMLCanvasElement, onScore: (n: number) => voi
 
     // Progress: how far the wall has risen toward the piece (0..1)
     // Trophy is at TROPHY_Y, wall starts at WALL_START_Y
-    const trophyLineY = HUD_H + 10;
     const wallTravelTotal = WALL_START_Y - (PIECE_Y + wallRows * CELL + 20);
 
     // ── Drawing helpers ──────────────────────────────────────────────────────
@@ -329,7 +313,7 @@ export function startGame(canvas: HTMLCanvasElement, onScore: (n: number) => voi
 
     // ── Piece visual objects ─────────────────────────────────────────────────
     // We rebuild piece cells every frame based on slideX
-    let pieceObjs: ReturnType<typeof k.add>[] = [];
+    let pieceObjs: GameObj<ColorComp>[] = [];
 
     function rebuildPiece() {
       pieceObjs.forEach(o => { if (o.exists()) k.destroy(o); });
